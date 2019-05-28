@@ -1,5 +1,4 @@
 import json
-from pyproj import Proj, transform
 
 from django import forms
 from django.contrib.gis.forms import BaseGeometryWidget
@@ -20,24 +19,6 @@ def minify_if_not_debug(asset):
     """
     return asset.format("" if not mw_settings.MINIFED else ".min")
 
-def coord_transform(x1, y1, proj1='3857', proj2='4326'):
-    """
-    Transforms coordinates between to lat/lon which is used in django-map-widgets
-    Requires the package pyproj.
-    If the coordinate transformation fails, the original coordinates are returned
-    :param x1: Latitude in any coordinate system (srid=proj1)
-    :param y1: Longitude in any coordinate system (srid=proj1)
-    :param proj1: srid of the original coordinate system
-    :param proj2: srid of the target coordinate system
-    :return: Coordinates in lat/lon, ready to be consumed by the widgets
-    """
-    try:
-        inProj = Proj(init='epsg:%s' % proj1)
-        outProj = Proj(init='epsg:%s' % proj2)
-        return transform(inProj, outProj, x1, y1)
-    except:
-        return x1, y1
-
 
 class BasePointFieldMapWidget(BaseGeometryWidget):
     settings_namespace = None
@@ -47,13 +28,15 @@ class BasePointFieldMapWidget(BaseGeometryWidget):
         attrs = kwargs.get("attrs")
         self.attrs = {}
         for key in ('geom_type', 'map_srid', 'map_width', 'map_height', 'display_raw'):
-            self.attrs[key] = getattr(self, key)
+            if key in kwargs:
+                self.attrs[key] = kwargs.get(key)
+            else:
+                self.attrs[key] = getattr(self, key)
 
         if isinstance(attrs, dict):
             self.attrs.update(attrs)
 
         self.custom_settings = False
-
         if kwargs.get("settings"):
             self.settings = kwargs.pop("settings")
             self.custom_settings = True
@@ -75,6 +58,7 @@ class GooglePointFieldWidget(BasePointFieldMapWidget):
     template_name = "mapwidgets/google-point-field-widget.html"
     settings = mw_settings.GooglePointFieldWidget
     settings_namespace = "GooglePointFieldWidget"
+    google_map_srid = 4326
 
     @property
     def media(self):
@@ -85,6 +69,7 @@ class GooglePointFieldWidget(BasePointFieldMapWidget):
         }
 
         js = [
+            "https://code.jquery.com/jquery-3.3.1.slim.min.js",
             "https://maps.googleapis.com/maps/api/js?libraries=places&language={}&key={}".format(
                 mw_settings.LANGUAGE, mw_settings.GOOGLE_MAP_API_KEY
             )
@@ -103,29 +88,37 @@ class GooglePointFieldWidget(BasePointFieldMapWidget):
 
         return forms.Media(js=js, css=css)
 
-    def render(self, name, value, attrs=None):
-        if not attrs:
+    def render(self, name, value, attrs=None, renderer=None):
+        if attrs is None:
             attrs = dict()
 
         field_value = {}
-        if isinstance(value,  Point):
-            x2, y2 = coord_transform(value.x, value.y, proj1=str(value.srid))
-            field_value["lng"] = x2
-            field_value["lat"] = y2
-
         if value and isinstance(value, six.string_types):
-            coordinates = self.deserialize(value)
-            field_value["lng"] = getattr(coordinates, "x", None)
-            field_value["lat"] = getattr(coordinates, "y", None)
+            value = self.deserialize(value)
+            longitude, latitude = value.coords
+            field_value["lng"] = longitude
+            field_value["lat"] = latitude
+
+        if isinstance(value,  Point):
+            if value.srid and value.srid != self.google_map_srid:
+                ogr = value.ogr
+                ogr.transform(self.google_map_srid)
+                value = ogr
+
+            longitude, latitude = value.coords
+            field_value["lng"] = longitude
+            field_value["lat"] = latitude
 
         extra_attrs = {
             "options": self.map_options(),
             "field_value": json.dumps(field_value)
         }
-
         attrs.update(extra_attrs)
         self.as_super = super(GooglePointFieldWidget, self)
-        return self.as_super.render(name, value, attrs)
+        if renderer is not None:
+            return self.as_super.render(name, value, attrs, renderer)
+        else:
+            return self.as_super.render(name, value, attrs)
 
 
 class PointFieldInlineWidgetMixin(object):
@@ -143,7 +136,7 @@ class PointFieldInlineWidgetMixin(object):
         }
         return js_widget_params
 
-    def render(self, name, value, attrs=None):
+    def render(self, name, value, attrs=None, renderer=None):
         if not attrs:
             attrs = dict()
 
@@ -155,7 +148,10 @@ class PointFieldInlineWidgetMixin(object):
             "is_formset_empty_form_template": is_formset_empty_form_template
         })
         self.as_super = super(PointFieldInlineWidgetMixin, self)
-        return self.as_super.render(name, value, attrs)
+        if renderer is not None:
+            return self.as_super.render(name, value, attrs, renderer)
+        else:
+            return self.as_super.render(name, value, attrs)
 
 
 class GooglePointFieldInlineWidget(PointFieldInlineWidgetMixin, GooglePointFieldWidget):
@@ -172,6 +168,7 @@ class GooglePointFieldInlineWidget(PointFieldInlineWidgetMixin, GooglePointField
         }
 
         js = [
+            "https://code.jquery.com/jquery-3.3.1.slim.min.js",
             "https://maps.googleapis.com/maps/api/js?libraries=places&language={}&key={}".format(
                 mw_settings.LANGUAGE, mw_settings.GOOGLE_MAP_API_KEY
             )
@@ -219,7 +216,7 @@ class BaseStaticMapWidget(forms.Widget):
             "attrs": attrs
         }
 
-    def render(self, name, value, attrs=None):
+    def render(self, name, value, attrs=None, renderer=None):
         context = self.get_context_data(name, value, attrs)
         template = self.get_template()
         return render_to_string(template, context)
@@ -294,6 +291,7 @@ class GoogleStaticOverlayMapWidget(GoogleStaticMapWidget):
         }
 
         js = (
+            "https://code.jquery.com/jquery-3.3.1.slim.min.js",
             minify_if_not_debug("mapwidgets/js/jquery.custom.magnific-popup{}.js"),
         )
 
